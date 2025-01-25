@@ -98,8 +98,8 @@ from tqdm import tqdm
 def segment_hands_with_sam2(
     input_video_path,
     output_video_path,
-    sam2_checkpoint,        # e.g. "../checkpoints/sam2.1_hiera_large.pt"
-    sam2_config,            # e.g. "configs/sam2.1/sam2.1_hiera_l.yaml"
+    sam2_checkpoint,        
+    sam2_config,          
     tmp_dir="./tmp_frames",
     max_frames=None,
     mediapipe_model_path = '../models/hand_landmarker.task',   # Path to your .task model or set None if using default
@@ -180,8 +180,14 @@ def segment_hands_with_sam2(
     # 3. Initialize SAM2 on these frames
     ##############################
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    predictor = build_sam2_video_predictor(sam2_config, sam2_checkpoint, device=device)
-    inference_state = predictor.init_state(video_path=tmp_dir)  # loads the frames in memory
+    predictor = build_sam2_video_predictor(
+    config_file=sam2_config,
+    ckpt_path=sam2_checkpoint,
+    device=device,
+)
+    
+    
+    inference_state = predictor.init_state(video_path=tmp_dir)
     predictor.reset_state(inference_state)
 
     ##############################
@@ -199,7 +205,7 @@ def segment_hands_with_sam2(
 
             # Add this bounding box to SAM2 on frame i
             # No clicks in this example, just the box.
-            _out_obj_ids, _out_mask_logits = predictor.add_new_points_or_box(
+            _out_obj_ids, _out_mask_logits, _ = predictor.add_new_points_or_box(
                 inference_state=inference_state,
                 frame_idx=i,
                 obj_id=obj_id,
@@ -243,8 +249,8 @@ def segment_hands_with_sam2(
     out_writer.release()
     print(f"Output video with masks saved to: {output_video_path}")
 
-    # Optionally, clean up temporary frames:
-    # shutil.rmtree(tmp_dir)
+    # clean up temporary frames:
+    shutil.rmtree(tmp_dir)
 
 
 if __name__ == "__main__":
