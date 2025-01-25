@@ -12,7 +12,7 @@ HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-# (Optional) For drawing connections between landmarks (hand skeleton).
+# For drawing connections between landmarks (hand skeleton).
 HAND_CONNECTIONS = [
     (0,1), (1,2), (2,3), (3,4),       # thumb
     (5,6), (6,7), (7,8),             # index finger
@@ -51,6 +51,61 @@ def detect_hands_in_image(
     detection_result = landmarker.detect(mp_image)
     return detection_result
 
+def get_bounding_box_coordinates(detection_result, image_width, image_height):
+    """
+    Returns the bounding box coordinates for each detected hand in pixel coordinates.
+
+    Args:
+        detection_result: The result from MediaPipe hand landmarker.
+        image_width (int): Width of the image in pixels.
+        image_height (int): Height of the image in pixels.
+
+    Returns:
+        List of tuples, each containing (x_min, y_min, x_max, y_max) for a hand.
+    """
+    bboxes = []
+    hand_landmarks_all = detection_result.hand_landmarks
+    if not hand_landmarks_all:
+        return bboxes
+    
+    for hand_landmarks in hand_landmarks_all:
+        xs = [lm.x * image_width for lm in hand_landmarks]
+        ys = [lm.y * image_height for lm in hand_landmarks]
+        x_min = min(xs)
+        x_max = max(xs)
+        y_min = min(ys)
+        y_max = max(ys)
+        bboxes.append( (x_min, y_min, x_max, y_max) )
+    return bboxes
+
+def get_landmark_coordinates(detection_result, image_width, image_height):
+    """
+    Returns the landmark coordinates for each detected hand in pixel coordinates (x, y)
+    and the original z (relative depth).
+
+    Args:
+        detection_result: The result from MediaPipe hand landmarker.
+        image_width (int): Width of the image in pixels.
+        image_height (int): Height of the image in pixels.
+
+    Returns:
+        List of lists, where each inner list contains tuples (x, y, z) for each landmark.
+    """
+    landmarks_list = []
+    hand_landmarks_all = detection_result.hand_landmarks
+    if not hand_landmarks_all:
+        return landmarks_list
+    
+    for hand_landmarks in hand_landmarks_all:
+        landmarks = []
+        for lm in hand_landmarks:
+            x = lm.x * image_width
+            y = lm.y * image_height
+            z = lm.z
+            landmarks.append( (x, y, z) )
+        landmarks_list.append( landmarks )
+    return landmarks_list
+
 def draw_hand_annotations(frame_bgr: np.ndarray, detection_result):
     """
     Draws bounding boxes and landmarks on the BGR frame in-place.
@@ -77,7 +132,7 @@ def draw_hand_annotations(frame_bgr: np.ndarray, detection_result):
         for i in range(21):
             cv2.circle(frame_bgr, (px[i], py[i]), 5, (0, 255, 0), -1)
 
-        # Optionally, connect them to form a skeleton.
+        # connect them to form a skeleton.
         for connection in HAND_CONNECTIONS:
             start_idx, end_idx = connection
             cv2.line(frame_bgr,
@@ -107,7 +162,6 @@ def main():
     os.makedirs(output_frames_dir, exist_ok=True)
 
     # 2. Create a HandLandmarker instance in IMAGE mode.
-    #    Make sure you have the appropriate .task model file locally.
     model_path = "/gpfs/data/shenlab/wz1492/HandTrack-SAM2/models/hand_landmarker.task"  # Update if needed
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
@@ -145,7 +199,24 @@ def main():
             # 5. Draw the landmarks and bounding boxes on the frame
             draw_hand_annotations(frame_bgr, detection_result)
 
-            # 6. Save the annotated frame to disk
+            # 6. Get coordinates and print them
+            image_width = frame_bgr.shape[1]
+            image_height = frame_bgr.shape[0]
+            
+            bboxes = get_bounding_box_coordinates(detection_result, image_width, image_height)
+            landmarks = get_landmark_coordinates(detection_result, image_width, image_height)
+
+            # Print bounding boxes
+            for hand_idx, bbox in enumerate(bboxes):
+                print(f"Frame {frame_index}, Hand {hand_idx}: BBox (x_min={bbox[0]:.2f}, y_min={bbox[1]:.2f}, x_max={bbox[2]:.2f}, y_max={bbox[3]:.2f})")
+
+            # Print landmarks
+            for hand_idx, hand_landmarks in enumerate(landmarks):
+                print(f"Frame {frame_index}, Hand {hand_idx}: Landmarks:")
+                for idx, (x, y, z) in enumerate(hand_landmarks):
+                    print(f"  {idx}: (x={x:.2f}, y={y:.2f}, z={z:.2f})")
+
+            # 7. Save the annotated frame to disk
             out_path = os.path.join(output_frames_dir, f"frame_{frame_index:05d}.jpg")
             cv2.imwrite(out_path, frame_bgr)
             frame_index += 1
