@@ -1,117 +1,4 @@
 # sam2_integration.py
-import os
-import cv2
-import numpy as np
-import mediapipe as mp
-import torch
-import matplotlib.pyplot as plt
-
-from sam2.build_sam import build_sam2_video_predictor
-
-import shutil
-from tqdm import tqdm
-
-#########################
-# Mediapipe Utils
-#########################
-
-mp_hands = mp.solutions.hands
-
-# If you're using the new tasks API:
-BaseOptions = mp.tasks.BaseOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-
-
-def detect_hands_in_image(image_rgb, landmarker):
-    """Runs the MediaPipe hand landmarker on the given RGB image."""
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=image_rgb
-    )
-    detection_result = landmarker.detect(mp_image)
-    return detection_result
-
-
-def get_bounding_box_coordinates(detection_result, image_width, image_height):
-    """
-    Returns bounding boxes [x_min, y_min, x_max, y_max] in pixel coords
-    for each detected hand.
-    """
-    bboxes = []
-    hand_landmarks_all = detection_result.hand_landmarks
-    if not hand_landmarks_all:
-        return bboxes
-
-    for hand_landmarks in hand_landmarks_all:
-        xs = [lm.x * image_width for lm in hand_landmarks]
-        ys = [lm.y * image_height for lm in hand_landmarks]
-        x_min = int(min(xs))
-        x_max = int(max(xs))
-        y_min = int(min(ys))
-        y_max = int(max(ys))
-        bboxes.append([x_min, y_min, x_max, y_max])
-    return bboxes
-
-
-#########################
-# SAM 2 Utils
-#########################
-
-def overlay_sam_mask_on_frame(frame_bgr, mask, color=(0, 255, 0), alpha=0.5):
-    """
-    Overlays a single binary mask on a BGR frame in-place.
-    mask is assumed to be (H,W) boolean or 0/1.
-    color is the BGR color for the mask overlay (default green).
-    alpha is blend factor.
-    """
-    if mask.dtype != np.uint8:
-        mask = mask.astype(np.uint8)
-    # Create 3-channel mask in the chosen color
-    colored_mask = np.zeros_like(frame_bgr, dtype=np.uint8)
-    colored_mask[mask == 1] = color
-
-    # Blend it onto the frame
-    cv2.addWeighted(colored_mask, alpha, frame_bgr, 1 - alpha, 0, frame_bgr)
-
-
-def overlay_multi_masks_on_frame(frame_bgr, masks_dict):
-    """
-    Overlays multiple masks on the frame.
-    masks_dict is a dict of {obj_id: binary_mask}, so we can color each object differently.
-    """
-    palette = [
-        (0, 255, 0),   # green
-        (0, 0, 255),   # red
-        (255, 0, 0),   # blue
-        (0, 255, 255), # yellow
-        (255, 0, 255), # magenta
-        (255, 255, 0), # cyan
-    ]
-    for i, (obj_id, mask) in enumerate(masks_dict.items()):
-        color = palette[i % len(palette)]
-        overlay_sam_mask_on_frame(frame_bgr, mask, color=color, alpha=0.5)
-
-
-def overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2):
-    """
-    Draws bounding boxes on the frame.
-    bboxes is a list of [x_min, y_min, x_max, y_max].
-    """
-    for bbox in bboxes:
-        x_min, y_min, x_max, y_max = bbox
-        cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), color, thickness)
-
-
-def overlay_combined_on_frame(frame_bgr, masks_dict, bboxes, mask_color=(0, 255, 0), bbox_color=(255, 0, 0), alpha=0.5, thickness=2):
-    """
-    Overlays both masks and bounding boxes on the frame.
-    """
-    overlay_multi_masks_on_frame(frame_bgr, masks_dict)
-    overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=bbox_color, thickness=thickness)
-
-
 def segment_hands_with_sam2(
     input_video_path,
     output_video_path,
@@ -122,6 +9,7 @@ def segment_hands_with_sam2(
     mediapipe_model_path="../models/hand_landmarker.task",
     prompt_mode="box",  # "box", "point", or "both"
     overlay_mode="both",  # "none", "mask", "bbox", or "both"
+    overlay_original=True  # NEW FLAG
 ):
     """
     1) Extract frames from input_video_path into tmp_dir.
@@ -129,7 +17,7 @@ def segment_hands_with_sam2(
     3) Initialize SAM2 on that folder of frames.
     4) Add prompts (box, point, or both).
     5) Propagate to get spatio-temporal masks.
-    6) Render and save the annotated video.
+    6) Render and save the annotated (or mask-only) video.
 
     Args:
         input_video_path (str): Path to the input video.
@@ -148,24 +36,23 @@ def segment_hands_with_sam2(
                             "mask"  -> Overlay segmentation masks only.
                             "bbox"  -> Overlay bounding boxes only.
                             "both"  -> Overlay both masks and bounding boxes.
+        overlay_original (bool): 
+            If True, overlay the masks (and possibly bounding boxes) on the original video.
+            If False, output only a color-coded mask video (black background).
     """
 
-    print("[DEBUG] segment_hands_with_sam2 called with:")
-    print(f"  input_video_path = {input_video_path}")
-    print(f"  output_video_path = {output_video_path}")
-    print(f"  sam2_checkpoint = {sam2_checkpoint}")
-    print(f"  sam2_config = {sam2_config}")
-    print(f"  tmp_dir = {tmp_dir}")
-    print(f"  max_frames = {max_frames}")
-    print(f"  mediapipe_model_path = {mediapipe_model_path}")
-    print(f"  prompt_mode = {prompt_mode}")
-    print(f"  overlay_mode = {overlay_mode}")
+    import os
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+    import torch
+    import shutil
+    from tqdm import tqdm
 
     ##############################
     # 0. Prep temporary directory
     ##############################
     os.makedirs(tmp_dir, exist_ok=True)
-    # Clear out old files if any
     for f in os.listdir(tmp_dir):
         os.remove(os.path.join(tmp_dir, f))
 
@@ -201,6 +88,43 @@ def segment_hands_with_sam2(
     ##############################
     # 2. Run MediaPipe to get bounding boxes
     ##############################
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision
+    mp_hands = mp.solutions.hands
+    BaseOptions = mp_python.BaseOptions
+    VisionRunningMode = vision.RunningMode
+    HandLandmarker = vision.HandLandmarker
+    HandLandmarkerOptions = vision.HandLandmarkerOptions
+
+    def detect_hands_in_image(image_rgb, landmarker):
+        """Runs the MediaPipe hand landmarker on the given RGB image."""
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=image_rgb
+        )
+        detection_result = landmarker.detect(mp_image)
+        return detection_result
+
+    def get_bounding_box_coordinates(detection_result, image_width, image_height):
+        """
+        Returns bounding boxes [x_min, y_min, x_max, y_max] in pixel coords
+        for each detected hand.
+        """
+        bboxes = []
+        hand_landmarks_all = detection_result.hand_landmarks
+        if not hand_landmarks_all:
+            return bboxes
+
+        for hand_landmarks in hand_landmarks_all:
+            xs = [lm.x * image_width for lm in hand_landmarks]
+            ys = [lm.y * image_height for lm in hand_landmarks]
+            x_min = int(min(xs))
+            x_max = int(max(xs))
+            y_min = int(min(ys))
+            y_max = int(max(ys))
+            bboxes.append([x_min, y_min, x_max, y_max])
+        return bboxes
+
     if mediapipe_model_path is None:
         raise ValueError(
             "Please provide a valid .task model path for MediaPipe or use the default."
@@ -226,13 +150,13 @@ def segment_hands_with_sam2(
             )
             bboxes = get_bounding_box_coordinates(result, w, h)
             bounding_boxes_per_frame[i] = bboxes
-
             # Debug print each frame's bounding box
             print(f"[DEBUG] Frame {i}, bounding boxes: {bboxes}")
 
     ##############################
     # 3. Initialize SAM2
     ##############################
+    from sam2.build_sam import build_sam2_video_predictor
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -253,6 +177,7 @@ def segment_hands_with_sam2(
         config_file=sam2_config,
         ckpt_path=sam2_checkpoint,
         device=device,
+        max_masks_per_prompt=1,
     )
 
     predictor.eval()
@@ -276,40 +201,44 @@ def segment_hands_with_sam2(
     ##############################
     print("[DEBUG] Adding prompts to SAM2...")
 
+    # Modify the prompt addition loop to limit to two prompts per frame
     for i in tqdm(range(total_frames), desc="Adding prompts"):
         bboxes = bounding_boxes_per_frame[i]
+        
+        # Limit to two bounding boxes per frame
+        if len(bboxes) > 2:
+            bboxes = bboxes[:2]
+            print(f"[DEBUG] Frame {i}: More than two bounding boxes detected. Limiting to first two.")
+        
         for j, box in enumerate(bboxes):
             x_min, y_min, x_max, y_max = box
-            obj_id = i * 100 + j  # naive unique ID per hand per frame
-
+            obj_id = j  # Assign consistent obj_id per hand across frames (0 and 1)
+            
             # Prepare bounding box
             box_arr = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
             # Prepare point -> e.g., center of the bounding box
             cx = (x_min + x_max) / 2.0
             cy = (y_min + y_max) / 2.0
-            # shape (1, 2)
-            point_coords = np.array([[cx, cy]], dtype=np.float32)
-            # '1' => positive
-            point_labels = np.array([1], dtype=np.int32)
+            point_coords = np.array([[cx, cy]], dtype=np.float32)  # shape (1, 2)
+            point_labels = np.array([1], dtype=np.int32)  # '1' => positive
 
             print(f"[DEBUG] Frame={i}, obj_id={obj_id}, box={box_arr.tolist()}")
             print(f"[DEBUG] Prompt center point=({cx:.1f}, {cy:.1f})")
 
-            # Choose the correct arguments for add_new_points_or_box
             if prompt_mode == "box":
                 predictor.add_new_points_or_box(
                     inference_state=inference_state,
                     frame_idx=i,
                     obj_id=obj_id,
-                    box=box_arr,     # only bounding box
+                    box=box_arr,
                 )
             elif prompt_mode == "point":
                 predictor.add_new_points_or_box(
                     inference_state=inference_state,
                     frame_idx=i,
                     obj_id=obj_id,
-                    points=point_coords,   # rename to match SAM2
+                    points=point_coords,
                     labels=point_labels,
                 )
             elif prompt_mode == "both":
@@ -318,7 +247,7 @@ def segment_hands_with_sam2(
                     frame_idx=i,
                     obj_id=obj_id,
                     box=box_arr,
-                    points=point_coords,   # rename to match SAM2
+                    points=point_coords,
                     labels=point_labels,
                 )
             else:
@@ -349,14 +278,51 @@ def segment_hands_with_sam2(
         raise
 
     ##############################
-    # 6. Render new video with masks
+    # 6. Render new video
     ##############################
+
+    # Utility overlay functions
+    def overlay_sam_mask_on_frame(frame_bgr, mask, color=(0, 255, 0), alpha=0.5):
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+        overlay = np.zeros_like(frame_bgr, dtype=np.uint8)
+        overlay[mask == 1] = color
+        blended = cv2.addWeighted(overlay, alpha, frame_bgr, 1 - alpha, 0)
+        mask_3ch = np.dstack([mask]*3)
+        frame_bgr[mask_3ch == 1] = blended[mask_3ch == 1]
+
+
+    def overlay_multi_masks_on_frame(frame_bgr, masks_dict, alpha=0.5):
+        # Some simple color palette
+        palette = [
+            (0, 255, 0),   # green
+            (0, 0, 255),   # red
+            (255, 0, 0),   # blue
+            (0, 255, 255), # yellow
+            (255, 0, 255), # magenta
+            (255, 255, 0), # cyan
+        ]
+        for i, (obj_id, mask) in enumerate(masks_dict.items()):
+            color = palette[i % len(palette)]
+            overlay_sam_mask_on_frame(frame_bgr, mask, color=color, alpha=alpha)
+
+    def overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2):
+        for bbox in bboxes:
+            x_min, y_min, x_max, y_max = bbox
+            cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), color, thickness)
+
+    def overlay_combined_on_frame(frame_bgr, masks_dict, bboxes, alpha=0.5):
+        # Overlays both masks (with alpha-blending) and bounding boxes
+        overlay_multi_masks_on_frame(frame_bgr, masks_dict, alpha=alpha)
+        overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2)
+
+
     if overlay_mode != "none":
-        print("[DEBUG] Rendering output video with overlays...")
+        print("[DEBUG] Rendering output video...")
         first_frame = cv2.imread(all_frame_paths[0])
         H, W, _ = first_frame.shape
 
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")  # H.264 in MP4
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # or 'avc1' for H.264
         fps = 30
         out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (W, H))
 
@@ -365,29 +331,77 @@ def segment_hands_with_sam2(
             masks_dict = video_segments.get(i, {})
             bboxes = bounding_boxes_per_frame[i]
 
-            if overlay_mode == "mask":
-                overlay_multi_masks_on_frame(frame_bgr, masks_dict)
-            elif overlay_mode == "bbox":
-                overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2)
-            elif overlay_mode == "both":
-                overlay_combined_on_frame(
-                    frame_bgr,
-                    masks_dict,
-                    bboxes,
-                    mask_color=(0, 255, 0),
-                    bbox_color=(255, 0, 0),
-                    alpha=0.5,
-                    thickness=2
-                )
-            else:
-                raise ValueError(
-                    "Invalid overlay_mode. Must be one of ['none', 'mask', 'bbox', 'both']."
-                )
+            if not overlay_original:
+                # Start with a black canvas (same size as original frame)
+                out_frame = np.zeros_like(frame_bgr, dtype=np.uint8)
+                
+                if overlay_mode == "mask":
+                    # Render color-coded masks on black
+                    palette = [
+                        (0, 255, 0),   # green
+                        (0, 0, 255),   # red
+                        (255, 0, 0),   # blue
+                        (0, 255, 255), # yellow
+                        (255, 0, 255), # magenta
+                        (255, 255, 0), # cyan
+                    ]
+                    for idx_obj, (obj_id, mask) in enumerate(masks_dict.items()):
+                        color = palette[idx_obj % len(palette)]
+                        out_frame[mask == 1] = color
 
-            out_writer.write(frame_bgr)
+                elif overlay_mode == "bbox":
+                    # Draw bounding boxes on black
+                    overlay_bounding_boxes_on_frame(out_frame, bboxes, color=(255, 0, 0), thickness=2)
+
+                elif overlay_mode == "both":
+                    # First put color-coded masks, then bounding boxes
+                    palette = [
+                        (0, 255, 0),   # green
+                        (0, 0, 255),   # red
+                        (255, 0, 0),   # blue
+                        (0, 255, 255), # yellow
+                        (255, 0, 255), # magenta
+                        (255, 255, 0), # cyan
+                    ]
+                    # Color-coded masks
+                    for idx_obj, (obj_id, mask) in enumerate(masks_dict.items()):
+                        color = palette[idx_obj % len(palette)]
+                        out_frame[mask == 1] = color
+                    # Then bounding boxes
+                    overlay_bounding_boxes_on_frame(out_frame, bboxes, color=(255, 0, 0), thickness=2)
+
+                elif overlay_mode == "none":
+                    # Black frame only
+                    out_frame = np.zeros_like(frame_bgr, dtype=np.uint8)
+
+                else:
+                    raise ValueError(
+                        "Invalid overlay_mode. Must be one of ['none', 'mask', 'bbox', 'both']."
+                    )
+
+            else:
+                # Overlay on the original frame
+                if overlay_mode == "mask":
+                    overlay_multi_masks_on_frame(frame_bgr, masks_dict, alpha=0.5)
+                    out_frame = frame_bgr
+
+                elif overlay_mode == "bbox":
+                    overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2)
+                    out_frame = frame_bgr
+
+                elif overlay_mode == "both":
+                    overlay_combined_on_frame(frame_bgr, masks_dict, bboxes, alpha=0.5)
+                    out_frame = frame_bgr
+
+                else:
+                    raise ValueError(
+                        "Invalid overlay_mode. Must be one of ['none', 'mask', 'bbox', 'both']."
+                    )
+
+            out_writer.write(out_frame)
 
         out_writer.release()
-        print(f"Output video with overlays saved to: {output_video_path}")
+        print(f"[DEBUG] Output video saved to: {output_video_path}")
     else:
         print("[DEBUG] Overlay video generation is disabled (overlay_mode='none').")
 
@@ -396,57 +410,30 @@ def segment_hands_with_sam2(
     print("[DEBUG] Temporary frames cleaned up.")
 
 
+
 if __name__ == "__main__":
     # Example usage with different overlay options
 
-    # Option 1: Generate video with both masks and bounding boxes
     segment_hands_with_sam2(
-        input_video_path="../data/test.mp4",
-        output_video_path="../output/output_both.mp4",
-        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
-        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
-        tmp_dir="../tmp_frames",
-        max_frames=10,  # or None if you want all frames
-        mediapipe_model_path="../models/hand_landmarker.task",
-        prompt_mode="box",  # "box", "point", or "both"
-        overlay_mode="both",  # "none", "mask", "bbox", or "both"
-    )
-
-    # Option 2: Generate video with only segmentation masks
+    input_video_path="../data/test.mp4",
+    output_video_path="../output/hands_mask_only.mp4",
+    sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
+    sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+    tmp_dir="../tmp_frames_mask",
+    max_frames=10,
+    mediapipe_model_path="../models/hand_landmarker.task",
+    prompt_mode="box",
+    overlay_mode="mask",   # or "both" / "bbox" / "none"
+    overlay_original=False)
+   
     segment_hands_with_sam2(
-        input_video_path="../data/test.mp4",
-        output_video_path="../output/output_mask.mp4",
-        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
-        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
-        tmp_dir="../tmp_frames_mask",
-        max_frames=10,
-        mediapipe_model_path="../models/hand_landmarker.task",
-        prompt_mode="box",
-        overlay_mode="mask",
-    )
-
-    # Option 3: Generate video with only bounding boxes
-    segment_hands_with_sam2(
-        input_video_path="../data/test.mp4",
-        output_video_path="../output/output_bbox.mp4",
-        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
-        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
-        tmp_dir="../tmp_frames_bbox",
-        max_frames=10,
-        mediapipe_model_path="../models/hand_landmarker.task",
-        prompt_mode="box",
-        overlay_mode="bbox",
-    )
-
-    # Option 4: Do not generate overlay video
-    segment_hands_with_sam2(
-        input_video_path="../data/test.mp4",
-        output_video_path="../output/output_none.mp4",  # This won't be created
-        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
-        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
-        tmp_dir="../tmp_frames_none",
-        max_frames=10,
-        mediapipe_model_path="../models/hand_landmarker.task",
-        prompt_mode="box",
-        overlay_mode="none",
-    )
+    input_video_path="../data/test.mp4",
+    output_video_path="../output/hands.mp4",
+    sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
+    sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+    tmp_dir="../tmp_frames_mask",
+    max_frames=10,
+    mediapipe_model_path="../models/hand_landmarker.task",
+    prompt_mode="box",
+    overlay_mode="mask",   # or "both" / "bbox" / "none"
+    overlay_original=True)
