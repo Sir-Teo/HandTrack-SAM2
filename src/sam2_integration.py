@@ -1,3 +1,4 @@
+# sam2_integration.py
 import os
 import cv2
 import numpy as np
@@ -93,6 +94,24 @@ def overlay_multi_masks_on_frame(frame_bgr, masks_dict):
         overlay_sam_mask_on_frame(frame_bgr, mask, color=color, alpha=0.5)
 
 
+def overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2):
+    """
+    Draws bounding boxes on the frame.
+    bboxes is a list of [x_min, y_min, x_max, y_max].
+    """
+    for bbox in bboxes:
+        x_min, y_min, x_max, y_max = bbox
+        cv2.rectangle(frame_bgr, (x_min, y_min), (x_max, y_max), color, thickness)
+
+
+def overlay_combined_on_frame(frame_bgr, masks_dict, bboxes, mask_color=(0, 255, 0), bbox_color=(255, 0, 0), alpha=0.5, thickness=2):
+    """
+    Overlays both masks and bounding boxes on the frame.
+    """
+    overlay_multi_masks_on_frame(frame_bgr, masks_dict)
+    overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=bbox_color, thickness=thickness)
+
+
 def segment_hands_with_sam2(
     input_video_path,
     output_video_path,
@@ -102,6 +121,7 @@ def segment_hands_with_sam2(
     max_frames=None,
     mediapipe_model_path="../models/hand_landmarker.task",
     prompt_mode="box",  # "box", "point", or "both"
+    overlay_mode="both",  # "none", "mask", "bbox", or "both"
 ):
     """
     1) Extract frames from input_video_path into tmp_dir.
@@ -123,6 +143,11 @@ def segment_hands_with_sam2(
                           "box" -> bounding boxes only,
                           "point" -> single center point,
                           "both" -> bounding boxes + center point.
+        overlay_mode (str): One of ["none", "mask", "bbox", "both"].
+                            "none"  -> No overlay video generated.
+                            "mask"  -> Overlay segmentation masks only.
+                            "bbox"  -> Overlay bounding boxes only.
+                            "both"  -> Overlay both masks and bounding boxes.
     """
 
     print("[DEBUG] segment_hands_with_sam2 called with:")
@@ -134,6 +159,7 @@ def segment_hands_with_sam2(
     print(f"  max_frames = {max_frames}")
     print(f"  mediapipe_model_path = {mediapipe_model_path}")
     print(f"  prompt_mode = {prompt_mode}")
+    print(f"  overlay_mode = {overlay_mode}")
 
     ##############################
     # 0. Prep temporary directory
@@ -325,22 +351,45 @@ def segment_hands_with_sam2(
     ##############################
     # 6. Render new video with masks
     ##############################
-    print("[DEBUG] Rendering output video...")
-    first_frame = cv2.imread(all_frame_paths[0])
-    H, W, _ = first_frame.shape
+    if overlay_mode != "none":
+        print("[DEBUG] Rendering output video with overlays...")
+        first_frame = cv2.imread(all_frame_paths[0])
+        H, W, _ = first_frame.shape
 
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # H.264 in MP4
-    fps = 30
-    out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (W, H))
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")  # H.264 in MP4
+        fps = 30
+        out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (W, H))
 
-    for i in tqdm(range(total_frames), desc="Writing output video"):
-        frame_bgr = cv2.imread(all_frame_paths[i])
-        masks_dict = video_segments.get(i, {})
-        overlay_multi_masks_on_frame(frame_bgr, masks_dict)
-        out_writer.write(frame_bgr)
+        for i in tqdm(range(total_frames), desc="Writing output video"):
+            frame_bgr = cv2.imread(all_frame_paths[i])
+            masks_dict = video_segments.get(i, {})
+            bboxes = bounding_boxes_per_frame[i]
 
-    out_writer.release()
-    print(f"Output video with masks saved to: {output_video_path}")
+            if overlay_mode == "mask":
+                overlay_multi_masks_on_frame(frame_bgr, masks_dict)
+            elif overlay_mode == "bbox":
+                overlay_bounding_boxes_on_frame(frame_bgr, bboxes, color=(255, 0, 0), thickness=2)
+            elif overlay_mode == "both":
+                overlay_combined_on_frame(
+                    frame_bgr,
+                    masks_dict,
+                    bboxes,
+                    mask_color=(0, 255, 0),
+                    bbox_color=(255, 0, 0),
+                    alpha=0.5,
+                    thickness=2
+                )
+            else:
+                raise ValueError(
+                    "Invalid overlay_mode. Must be one of ['none', 'mask', 'bbox', 'both']."
+                )
+
+            out_writer.write(frame_bgr)
+
+        out_writer.release()
+        print(f"Output video with overlays saved to: {output_video_path}")
+    else:
+        print("[DEBUG] Overlay video generation is disabled (overlay_mode='none').")
 
     # Clean up temporary frames
     shutil.rmtree(tmp_dir)
@@ -348,14 +397,56 @@ def segment_hands_with_sam2(
 
 
 if __name__ == "__main__":
-    # Example usage
+    # Example usage with different overlay options
+
+    # Option 1: Generate video with both masks and bounding boxes
     segment_hands_with_sam2(
         input_video_path="../data/test.mp4",
-        output_video_path="../output/output.mp4",
+        output_video_path="../output/output_both.mp4",
         sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
         sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
         tmp_dir="../tmp_frames",
-        max_frames=100,  # or None if you want all frames
+        max_frames=10,  # or None if you want all frames
         mediapipe_model_path="../models/hand_landmarker.task",
         prompt_mode="box",  # "box", "point", or "both"
+        overlay_mode="both",  # "none", "mask", "bbox", or "both"
+    )
+
+    # Option 2: Generate video with only segmentation masks
+    segment_hands_with_sam2(
+        input_video_path="../data/test.mp4",
+        output_video_path="../output/output_mask.mp4",
+        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
+        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+        tmp_dir="../tmp_frames_mask",
+        max_frames=10,
+        mediapipe_model_path="../models/hand_landmarker.task",
+        prompt_mode="box",
+        overlay_mode="mask",
+    )
+
+    # Option 3: Generate video with only bounding boxes
+    segment_hands_with_sam2(
+        input_video_path="../data/test.mp4",
+        output_video_path="../output/output_bbox.mp4",
+        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
+        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+        tmp_dir="../tmp_frames_bbox",
+        max_frames=10,
+        mediapipe_model_path="../models/hand_landmarker.task",
+        prompt_mode="box",
+        overlay_mode="bbox",
+    )
+
+    # Option 4: Do not generate overlay video
+    segment_hands_with_sam2(
+        input_video_path="../data/test.mp4",
+        output_video_path="../output/output_none.mp4",  # This won't be created
+        sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
+        sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+        tmp_dir="../tmp_frames_none",
+        max_frames=10,
+        mediapipe_model_path="../models/hand_landmarker.task",
+        prompt_mode="box",
+        overlay_mode="none",
     )
