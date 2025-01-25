@@ -35,7 +35,20 @@ conda activate sam2
 3. Install the required dependencies:
 
 ```bash
-pip install -r requirements.txt
+# Environment Set Up
+conda create -n sam2 python=3.12 -y
+conda activate sam2
+
+# Install PyTorch with CUDA 11.8 support
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# Note: Installation may take some time. If you encounter issues, refer to the official PyTorch installation guide.
+
+# Set up SAM 2
+# Follow the official SAM 2 setup instructions
+
+# Install additional dependencies
+pip install -q mediapipe
+pip install opencv-python
 ```
 
 4. Download the SAM2 model weights:
