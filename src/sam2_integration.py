@@ -412,7 +412,6 @@ def segment_hands_with_sam2(
 
 
 if __name__ == "__main__":
-    # Example usage with different overlay options
 
     segment_hands_with_sam2(
     input_video_path="../data/test.mp4",
