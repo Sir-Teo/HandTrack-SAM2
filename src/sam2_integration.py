@@ -201,26 +201,29 @@ def segment_hands_with_sam2(
     ##############################
     print("[DEBUG] Adding prompts to SAM2...")
 
-    # Modify the prompt addition loop to limit to two prompts per frame
     for i in tqdm(range(total_frames), desc="Adding prompts"):
-        bboxes = bounding_boxes_per_frame[i]
+        # --- Only provide prompts on the first frame ---
+        if i > 0:
+            continue  # Skip adding prompts on subsequent frames
         
-        # Limit to two bounding boxes per frame
+        bboxes = bounding_boxes_per_frame[i]
+
+        # Optionally, limit to two bounding boxes
         if len(bboxes) > 2:
             bboxes = bboxes[:2]
             print(f"[DEBUG] Frame {i}: More than two bounding boxes detected. Limiting to first two.")
         
         for j, box in enumerate(bboxes):
             x_min, y_min, x_max, y_max = box
-            obj_id = j  # Assign consistent obj_id per hand across frames (0 and 1)
-            
+            obj_id = j  # e.g., 0 or 1
+
             # Prepare bounding box
             box_arr = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
-            # Prepare point -> e.g., center of the bounding box
+            # Prepare a center point
             cx = (x_min + x_max) / 2.0
             cy = (y_min + y_max) / 2.0
-            point_coords = np.array([[cx, cy]], dtype=np.float32)  # shape (1, 2)
+            point_coords = np.array([[cx, cy]], dtype=np.float32)
             point_labels = np.array([1], dtype=np.int32)  # '1' => positive
 
             print(f"[DEBUG] Frame={i}, obj_id={obj_id}, box={box_arr.tolist()}")
@@ -256,6 +259,7 @@ def segment_hands_with_sam2(
                 )
 
     print("All prompts have been added to SAM2.")
+
 
     ##############################
     # 5. Propagate to get masks
@@ -419,7 +423,7 @@ if __name__ == "__main__":
     sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
     sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
     tmp_dir="../tmp_frames_mask",
-    max_frames=10,
+    max_frames=None,
     mediapipe_model_path="../models/hand_landmarker.task",
     prompt_mode="box",
     overlay_mode="mask",   # or "both" / "bbox" / "none"
@@ -431,7 +435,7 @@ if __name__ == "__main__":
     sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
     sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
     tmp_dir="../tmp_frames_mask",
-    max_frames=10,
+    max_frames=None,
     mediapipe_model_path="../models/hand_landmarker.task",
     prompt_mode="box",
     overlay_mode="mask",   # or "both" / "bbox" / "none"

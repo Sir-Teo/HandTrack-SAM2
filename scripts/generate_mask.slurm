@@ -23,12 +23,10 @@ python src/main.py \
     --input_video_path "./data/test.mp4" \
     --output_video_path "./output/hands_mask_only.mp4" \
     --sam2_checkpoint "./sam2/checkpoints/sam2.1_hiera_large.pt" \
-    --sam2_config "./sam2/configs/sam2.1/sam2.1_hiera_l.yaml" \
+    --sam2_config "/gpfs/data/shenlab/wz1492/HandTrack-SAM2/sam2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml" \
     --tmp_dir "./tmp_frames_mask" \
     --mediapipe_model_path "./models/hand_landmarker.task" \
     --prompt_mode "box" \
     --additional_runs \
         '{"output_video_path":"./output/hands_overlay.mp4","overlay_original":true}' \
         '{"output_video_path":"./output/hands_bbox_only.mp4","overlay_mode":"bbox"}'
-
-
