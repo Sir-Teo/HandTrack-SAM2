@@ -172,7 +172,7 @@ cython_debug/
 
 
 sam2/
-output/
+
 models/
 src/tmp_frames/
 tmp_frames/
