@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# sam2_integration_debug_float.py
-
 import os
 import cv2
 import numpy as np
@@ -8,12 +5,10 @@ import mediapipe as mp
 import torch
 import matplotlib.pyplot as plt
 
-
-# For SAM 2 imports:
 from sam2.build_sam import build_sam2_video_predictor
 
-# If you want to see plots inline in a notebook:
-# %matplotlib inline
+import shutil
+from tqdm import tqdm
 
 #########################
 # Mediapipe Utils
@@ -84,7 +79,6 @@ def overlay_multi_masks_on_frame(frame_bgr, masks_dict):
     """
     Overlays multiple masks on the frame.
     masks_dict is a dict of {obj_id: binary_mask}, so we can color each object differently.
-    For simplicity, we’ll just pick random colors or use a deterministic palette.
     """
     palette = [
         (0, 255, 0),   # green
@@ -99,10 +93,6 @@ def overlay_multi_masks_on_frame(frame_bgr, masks_dict):
         overlay_sam_mask_on_frame(frame_bgr, mask, color=color, alpha=0.5)
 
 
-import shutil
-from tqdm import tqdm
-
-
 def segment_hands_with_sam2(
     input_video_path,
     output_video_path,
@@ -110,15 +100,29 @@ def segment_hands_with_sam2(
     sam2_config,
     tmp_dir="./tmp_frames",
     max_frames=None,
-    mediapipe_model_path="../models/hand_landmarker.task",  # or None if not using a custom path
+    mediapipe_model_path="../models/hand_landmarker.task",
+    prompt_mode="box",  # "box", "point", or "both"
 ):
     """
-    1) Extract all frames from input_video_path into tmp_dir as JPEGs.
-    2) Use a MediaPipe hand landmarker to detect bounding boxes per frame.
-    3) Initialize SAM2 on that folder of frames (forced to float32).
-    4) Add bounding box prompts for every hand in every frame (unique object ID).
-    5) Propagate to get spatio-temporal masks for all objects.
-    6) Render each frame with the resulting masks into a new video at output_video_path.
+    1) Extract frames from input_video_path into tmp_dir.
+    2) Use MediaPipe to detect bounding boxes per frame.
+    3) Initialize SAM2 on that folder of frames.
+    4) Add prompts (box, point, or both).
+    5) Propagate to get spatio-temporal masks.
+    6) Render and save the annotated video.
+
+    Args:
+        input_video_path (str): Path to the input video.
+        output_video_path (str): Path to the output video with masks.
+        sam2_checkpoint (str): Path to the SAM2 checkpoint.
+        sam2_config (str): Path to the SAM2 config file.
+        tmp_dir (str): Directory for temporarily storing extracted frames.
+        max_frames (int|None): If not None, limit processing to the first N frames.
+        mediapipe_model_path (str): Path to MediaPipe hand_landmarker .task model.
+        prompt_mode (str): One of ["box","point","both"].
+                          "box" -> bounding boxes only,
+                          "point" -> single center point,
+                          "both" -> bounding boxes + center point.
     """
 
     print("[DEBUG] segment_hands_with_sam2 called with:")
@@ -129,6 +133,7 @@ def segment_hands_with_sam2(
     print(f"  tmp_dir = {tmp_dir}")
     print(f"  max_frames = {max_frames}")
     print(f"  mediapipe_model_path = {mediapipe_model_path}")
+    print(f"  prompt_mode = {prompt_mode}")
 
     ##############################
     # 0. Prep temporary directory
@@ -168,11 +173,11 @@ def segment_hands_with_sam2(
         return
 
     ##############################
-    # 2. Run MediaPipe on each frame to get hand bounding boxes
+    # 2. Run MediaPipe to get bounding boxes
     ##############################
     if mediapipe_model_path is None:
         raise ValueError(
-            "Please provide a valid .task model path for MediaPipe or use default usage."
+            "Please provide a valid .task model path for MediaPipe or use the default."
         )
     mp_options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=mediapipe_model_path),
@@ -200,9 +205,8 @@ def segment_hands_with_sam2(
             print(f"[DEBUG] Frame {i}, bounding boxes: {bboxes}")
 
     ##############################
-    # 3. Initialize SAM2 on these frames
+    # 3. Initialize SAM2
     ##############################
-    # select the device for computation
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -212,75 +216,91 @@ def segment_hands_with_sam2(
     print(f"using device: {device}")
 
     if device.type == "cuda":
-        # use bfloat16 for the entire notebook
+        # Example: use bfloat16 or float32
         torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-        # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
         if torch.cuda.get_device_properties(0).major >= 8:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-    print(f"[DEBUG] Initializing SAM2 predictor on device='{device}'")
 
+    print(f"[DEBUG] Initializing SAM2 predictor on device='{device}'")
     predictor = build_sam2_video_predictor(
         config_file=sam2_config,
         ckpt_path=sam2_checkpoint,
         device=device,
     )
 
-    predictor = build_sam2_video_predictor(
-    config_file=sam2_config,
-    ckpt_path=sam2_checkpoint,
-    device=device,
-)
-
-    # Put the predictor in eval mode (if needed)
     predictor.eval()
 
-    # --- 1) Force all parameters to float32 ---
+    # Force float32 if desired
     for name, param in predictor.named_parameters():
         if param.dtype != torch.float32:
             param.data = param.data.float()
-            print(f"[DEBUG] Converting param '{name}' from {param.dtype} to float32")
-
-    # --- 2) Force all buffers to float32 ---
+            print(f"[DEBUG] Converting param '{name}' to float32")
     for name, buf in predictor.named_buffers():
         if buf.dtype in (torch.float16, torch.bfloat16):
             buf.data = buf.data.float()
-            print(f"[DEBUG] Converting buffer '{name}' from {buf.dtype} to float32")
+            print(f"[DEBUG] Converting buffer '{name}' to float32")
 
-    # --- 3) Double-check everything is now float32 ---
-    for name, param in predictor.named_parameters():
-        if param.dtype != torch.float32:
-            print(f"[WARNING] Param '{name}' is still {param.dtype}")
-    for name, buf in predictor.named_buffers():
-        if buf.dtype in (torch.float16, torch.bfloat16):
-            print(f"[WARNING] Buffer '{name}' is still {buf.dtype}")
-
-
-        print("[DEBUG] Creating inference state...")
-        inference_state = predictor.init_state(video_path=tmp_dir)
-        predictor.reset_state(inference_state)
+    print("[DEBUG] Creating inference state...")
+    inference_state = predictor.init_state(video_path=tmp_dir)
+    predictor.reset_state(inference_state)
 
     ##############################
-    # 4. Add bounding boxes for each hand in each frame
+    # 4. Add prompts (box, point, or both)
     ##############################
-    print("[DEBUG] Adding bounding boxes to SAM2...")
-    for i in tqdm(range(total_frames), desc="Adding bounding boxes to SAM2"):
+    print("[DEBUG] Adding prompts to SAM2...")
+
+    for i in tqdm(range(total_frames), desc="Adding prompts"):
         bboxes = bounding_boxes_per_frame[i]
         for j, box in enumerate(bboxes):
             x_min, y_min, x_max, y_max = box
-            obj_id = i * 100 + j  # naive unique ID
+            obj_id = i * 100 + j  # naive unique ID per hand per frame
+
+            # Prepare bounding box
             box_arr = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
-            # Debug print for box info
-            print(f"[DEBUG] Frame {i}, obj_id={obj_id}, box_arr={box_arr.tolist()}")
+            # Prepare point -> e.g., center of the bounding box
+            cx = (x_min + x_max) / 2.0
+            cy = (y_min + y_max) / 2.0
+            # shape (1, 2)
+            point_coords = np.array([[cx, cy]], dtype=np.float32)
+            # '1' => positive
+            point_labels = np.array([1], dtype=np.int32)
 
-            _out_obj_ids, _out_mask_logits, _ = predictor.add_new_points_or_box(
-                inference_state=inference_state,
-                frame_idx=i,
-                obj_id=obj_id,
-                box=box_arr
-            )
-    print("All bounding boxes have been added to SAM2.")
+            print(f"[DEBUG] Frame={i}, obj_id={obj_id}, box={box_arr.tolist()}")
+            print(f"[DEBUG] Prompt center point=({cx:.1f}, {cy:.1f})")
+
+            # Choose the correct arguments for add_new_points_or_box
+            if prompt_mode == "box":
+                predictor.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=i,
+                    obj_id=obj_id,
+                    box=box_arr,     # only bounding box
+                )
+            elif prompt_mode == "point":
+                predictor.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=i,
+                    obj_id=obj_id,
+                    points=point_coords,   # rename to match SAM2
+                    labels=point_labels,
+                )
+            elif prompt_mode == "both":
+                predictor.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=i,
+                    obj_id=obj_id,
+                    box=box_arr,
+                    points=point_coords,   # rename to match SAM2
+                    labels=point_labels,
+                )
+            else:
+                raise ValueError(
+                    "Invalid prompt_mode. Must be one of ['box','point','both']."
+                )
+
+    print("All prompts have been added to SAM2.")
 
     ##############################
     # 5. Propagate to get masks
@@ -289,20 +309,16 @@ def segment_hands_with_sam2(
     video_segments = {}
     try:
         for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-            # Debug info about shapes/dtypes
-            print(f"[DEBUG] Propagate got frame_idx={out_frame_idx}, obj_ids={out_obj_ids}")
-            print(f"[DEBUG] out_mask_logits shape: {out_mask_logits.shape}, dtype: {out_mask_logits.dtype}")
-
-            # out_mask_logits: (num_objs, H, W)
-            # threshold them to get binary masks
+            # out_mask_logits shape: (num_objs, H, W)
             frame_masks = {}
-            for i, obj_id in enumerate(out_obj_ids):
-                mask_bin = (out_mask_logits[i] > 0).cpu().numpy().astype(np.uint8)
+            for idx_in_batch, obj_id in enumerate(out_obj_ids):
+                mask_bin = (out_mask_logits[idx_in_batch, 0] > 0).cpu().numpy().astype(np.uint8)
                 frame_masks[obj_id] = mask_bin
+
             video_segments[out_frame_idx] = frame_masks
             print(f"[DEBUG] Stored masks for frame {out_frame_idx} with IDs {out_obj_ids}")
     except Exception as e:
-        print("[DEBUG] Exception encountered during propagate_in_video:")
+        print("[DEBUG] Exception in propagate_in_video:")
         print(e)
         raise
 
@@ -312,32 +328,34 @@ def segment_hands_with_sam2(
     print("[DEBUG] Rendering output video...")
     first_frame = cv2.imread(all_frame_paths[0])
     H, W, _ = first_frame.shape
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    fps = 30  # or match the original input video fps
+
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")  # H.264 in MP4
+    fps = 30
     out_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (W, H))
 
     for i in tqdm(range(total_frames), desc="Writing output video"):
         frame_bgr = cv2.imread(all_frame_paths[i])
         masks_dict = video_segments.get(i, {})
-        # Overlay each mask
         overlay_multi_masks_on_frame(frame_bgr, masks_dict)
         out_writer.write(frame_bgr)
 
     out_writer.release()
     print(f"Output video with masks saved to: {output_video_path}")
 
-    # Clean up temporary frames:
+    # Clean up temporary frames
     shutil.rmtree(tmp_dir)
     print("[DEBUG] Temporary frames cleaned up.")
 
 
 if __name__ == "__main__":
+    # Example usage
     segment_hands_with_sam2(
         input_video_path="../data/test.mp4",
-        output_video_path="../data/output.mp4",
+        output_video_path="../output/output.mp4",
         sam2_checkpoint="../sam2/checkpoints/sam2.1_hiera_large.pt",
         sam2_config="../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
         tmp_dir="../tmp_frames",
-        max_frames=5,  # limit to the first 5 frames for debugging
+        max_frames=100,  # or None if you want all frames
         mediapipe_model_path="../models/hand_landmarker.task",
+        prompt_mode="box",  # "box", "point", or "both"
     )
