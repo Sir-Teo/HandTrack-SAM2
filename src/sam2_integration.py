@@ -8,8 +8,6 @@ import mediapipe as mp
 import torch
 import matplotlib.pyplot as plt
 
-# Optional: Force high-precision matmul to avoid auto-bfloat16 usage on Ampere GPUs
-torch.set_float32_matmul_precision("high")
 
 # For SAM 2 imports:
 from sam2.build_sam import build_sam2_video_predictor
@@ -204,7 +202,22 @@ def segment_hands_with_sam2(
     ##############################
     # 3. Initialize SAM2 on these frames
     ##############################
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # select the device for computation
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    print(f"using device: {device}")
+
+    if device.type == "cuda":
+        # use bfloat16 for the entire notebook
+        torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+        # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+        if torch.cuda.get_device_properties(0).major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
     print(f"[DEBUG] Initializing SAM2 predictor on device='{device}'")
 
     predictor = build_sam2_video_predictor(
@@ -213,12 +226,39 @@ def segment_hands_with_sam2(
         device=device,
     )
 
+    predictor = build_sam2_video_predictor(
+    config_file=sam2_config,
+    ckpt_path=sam2_checkpoint,
+    device=device,
+)
+
+    # Put the predictor in eval mode (if needed)
+    predictor.eval()
+
+    # --- 1) Force all parameters to float32 ---
+    for name, param in predictor.named_parameters():
+        if param.dtype != torch.float32:
+            param.data = param.data.float()
+            print(f"[DEBUG] Converting param '{name}' from {param.dtype} to float32")
+
+    # --- 2) Force all buffers to float32 ---
+    for name, buf in predictor.named_buffers():
+        if buf.dtype in (torch.float16, torch.bfloat16):
+            buf.data = buf.data.float()
+            print(f"[DEBUG] Converting buffer '{name}' from {buf.dtype} to float32")
+
+    # --- 3) Double-check everything is now float32 ---
+    for name, param in predictor.named_parameters():
+        if param.dtype != torch.float32:
+            print(f"[WARNING] Param '{name}' is still {param.dtype}")
+    for name, buf in predictor.named_buffers():
+        if buf.dtype in (torch.float16, torch.bfloat16):
+            print(f"[WARNING] Buffer '{name}' is still {buf.dtype}")
 
 
-
-    print("[DEBUG] Creating inference state...")
-    inference_state = predictor.init_state(video_path=tmp_dir)
-    predictor.reset_state(inference_state)
+        print("[DEBUG] Creating inference state...")
+        inference_state = predictor.init_state(video_path=tmp_dir)
+        predictor.reset_state(inference_state)
 
     ##############################
     # 4. Add bounding boxes for each hand in each frame
@@ -229,7 +269,7 @@ def segment_hands_with_sam2(
         for j, box in enumerate(bboxes):
             x_min, y_min, x_max, y_max = box
             obj_id = i * 100 + j  # naive unique ID
-            box_arr = np.array([x_min, y_min, x_max, y_max], dtype=np.float16)
+            box_arr = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
             # Debug print for box info
             print(f"[DEBUG] Frame {i}, obj_id={obj_id}, box_arr={box_arr.tolist()}")
