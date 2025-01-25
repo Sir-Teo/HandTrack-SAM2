@@ -7,6 +7,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Segment hands in a video using MediaPipe and SAM2."
     )
+    
 
     # Required arguments
     parser.add_argument(
