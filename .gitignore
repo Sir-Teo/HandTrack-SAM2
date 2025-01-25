@@ -176,3 +176,4 @@ sam2/
 models/
 src/tmp_frames/
 tmp_frames/
+logs/
